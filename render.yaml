@@ -1,0 +1,46 @@
+services:
+  # ─── Backend API ─────────────────────────────────────────────────────────────
+  - type: web
+    name: shipment-tracker-backend
+    env: docker
+    region: oregon
+    plan: free
+    branch: main
+    healthCheckPath: /api/health
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # Set this manually in Render dashboard → Environment → DATABASE_URL
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 1440
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: FRONTEND_URL
+        value: https://shipment-tracker-frontend.onrender.com
+    autoDeploy: true
+    preDeployCommand: "cd /app && alembic upgrade head"
+
+  # ─── Frontend Static Site ─────────────────────────────────────────────────
+  - type: web
+    name: shipment-tracker-frontend
+    env: static
+    branch: main
+    buildCommand: "cd frontend && npm install && npm run build"
+    staticPublishPath: frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://shipment-tracker-backend.onrender.com/api
+    autoDeploy: true
+
+# No Render-managed database needed — using Neon.tech (free, no 90-day expiry).
+# Set DATABASE_URL manually in the Render dashboard for the backend service.

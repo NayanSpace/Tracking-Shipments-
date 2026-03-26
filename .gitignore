@@ -1,0 +1,44 @@
+# Environment files — NEVER commit these
+.env
+.env.local
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Playwright
+test-results/
+playwright-report/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic compiled
+*.pyc
+
+# Debug / investigation scripts (contain hardcoded real tracking numbers)
+backend/debug/
+backend/debug_pages.py
+backend/find_urls.py
+backend/find_urls2.py
+backend/find_urls3.py
+backend/find_urls4.py

@@ -19,7 +19,7 @@ def start_scheduler():
     """Initialize background jobs and start the scheduler."""
     scheduler.add_job(
         auto_refresh_tracking,
-        trigger=IntervalTrigger(hours=3),
+        trigger=IntervalTrigger(hours=6),
         id="auto_refresh",
         name="Auto-refresh undelivered shipments every 3 hours",
         replace_existing=True,
@@ -54,7 +54,7 @@ async def auto_refresh_tracking():
     logger.info("auto_refresh_tracking: starting")
     db = SessionLocal()
     try:
-        three_hours_ago = datetime.utcnow() - timedelta(hours=3)
+        three_hours_ago = datetime.utcnow() - timedelta(hours=6)
         to_refresh = db.query(TrackingNumber).filter(
             TrackingNumber.status.notin_(["Delivered", "Failed"]),
             or_(

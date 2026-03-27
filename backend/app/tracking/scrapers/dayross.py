@@ -111,7 +111,9 @@ class DayRossScraper(BaseScraper):
     def _parse_api_response(self, data: dict) -> Optional[Dict[str, Any]]:
         """
         Parse Day & Ross TruckMateAPI response.
-        Shape: { "orderItems": [{ "status": "Delivered", "deliveryDate": "...", ... }], "total": 1 }
+        Shape: { "orderItems": [{ "status": "...", "statusCode": "...", ... }], "total": 1 }
+        Note: detailed event history requires a logged-in Day & Ross account session.
+        The public API returns summary data only.
         """
         try:
             order_items = data.get("orderItems", [])
@@ -119,53 +121,92 @@ class DayRossScraper(BaseScraper):
                 return None
 
             item = order_items[0]
-            status_raw = item.get("status", "") or item.get("statusCode", "") or ""
-            if not status_raw:
+            status_raw = item.get("status", "") or ""
+            status_code = item.get("statusCode", "") or ""
+            if not status_raw and not status_code:
                 return None
 
-            # Location: destination city/province
-            to_info = item.get("to", {}) or {}
             from_info = item.get("from", {}) or {}
-            dest_parts = [to_info.get("city", ""), to_info.get("provinceCode", ""), to_info.get("countryCode", "")]
-            location = ", ".join(p for p in dest_parts if p) or None
+            to_info = item.get("to", {}) or {}
 
-            delivered_raw = item.get("deliveryDate") or item.get("estimatedDeliveryDate") or ""
+            origin_parts = [from_info.get("city", ""), from_info.get("provinceCode", ""), from_info.get("countryCode", "")]
+            origin = ", ".join(p for p in origin_parts if p) or None
+
+            dest_parts = [to_info.get("city", ""), to_info.get("provinceCode", ""), to_info.get("countryCode", "")]
+            destination = ", ".join(p for p in dest_parts if p) or None
+
+            delivered_raw = item.get("deliveryDate") or ""
             est_raw = item.get("estimatedDeliveryDate") or ""
 
-            # Events — Day & Ross TruckMateAPI doesn't return detailed events in this endpoint
-            # Build a synthetic event from the status info
-            events = []
-            ship_date = item.get("shipDate") or item.get("createdTime") or ""
-            if ship_date:
+            # Status mapping — use statusCode first for precision, fall back to status text
+            status_code_upper = status_code.upper()
+            if status_code_upper in ("COMPLETE", "DELIVERED"):
+                status = "Delivered"
+            elif status_code_upper in ("SVCFAILURE", "EXCEPTION", "DAMAGED", "REFUSED"):
+                status = "Exception"
+            elif status_code_upper in ("INTRANSIT", "IN_TRANSIT", "PICKED_UP", "DISPATCHED"):
+                status = "In Transit"
+            elif status_code_upper in ("PENDING", "BOOKED", "CREATED"):
+                status = "Pending"
+            else:
+                status = self._normalize_status(status_raw)
+
+            # Synthesize events from available summary fields
+            # (Full event history requires Day & Ross account login — not available via public API)
+            events: List[dict] = []
+
+            # 1. Shipment created
+            created_raw = item.get("createdTime") or item.get("shipDate") or ""
+            if created_raw:
                 events.append({
-                    "timestamp": self._parse_datetime(ship_date) or datetime.now(),
-                    "location": f"{from_info.get('city', '')}, {from_info.get('provinceCode', '')}".strip(", ") or None,
+                    "timestamp": self._parse_datetime(created_raw) or datetime.now(),
+                    "location": origin,
                     "status": "Shipment Created",
                     "description": "Shipment Created",
                 })
-            if delivered_raw and status_raw.lower() in ("delivered", "complete"):
+
+            # 2. Pickup done (if true and we have a ship date hint)
+            if item.get("pickupDone") and created_raw:
+                # pickupDone=true but no exact pickup timestamp — note it after creation
+                events.append({
+                    "timestamp": self._parse_datetime(created_raw) or datetime.now(),
+                    "location": origin,
+                    "status": "Picked Up",
+                    "description": "Picked Up by carrier",
+                })
+
+            # 3. Delivered event — takes priority over generic status event
+            if delivered_raw and status == "Delivered":
                 events.insert(0, {
                     "timestamp": self._parse_datetime(delivered_raw) or datetime.now(),
-                    "location": location,
+                    "location": destination,
                     "status": "Delivered",
                     "description": "Delivered",
                 })
+            elif status_raw and status_raw.lower() not in ("shipment created",):
+                # Add current status as an event (not for delivered — handled above)
+                events.append({
+                    "timestamp": self._parse_datetime(est_raw or created_raw) or datetime.now(),
+                    "location": destination,
+                    "status": status_raw,
+                    "description": status_raw,
+                })
 
-            status = self._normalize_status(status_raw)
-            # Map Day & Ross specific codes
-            if status_raw.upper() in ("COMPLETE",):
-                status = "Delivered"
-            elif status_raw.upper() in ("INTRANSIT", "IN_TRANSIT", "PICKED_UP"):
-                status = "In Transit"
+            # Sort: most recent first
+            events.sort(key=lambda e: e["timestamp"] or datetime.min, reverse=True)
 
             delivered_date = None
             if status == "Delivered" and delivered_raw:
                 dt = self._parse_datetime(delivered_raw)
                 delivered_date = dt.date() if dt else None
 
+            # Current location: show destination for delivered, None otherwise
+            # (real in-transit location is not available from the public TruckMateAPI)
+            current_location = destination if status == "Delivered" else None
+
             return {
                 "status": status,
-                "current_location": location,
+                "current_location": current_location,
                 "estimated_delivery": self._parse_date(est_raw),
                 "delivered_date": delivered_date,
                 "events": events,

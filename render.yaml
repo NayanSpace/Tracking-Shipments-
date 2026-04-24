@@ -5,7 +5,7 @@ services:
     env: docker
     region: oregon
     plan: free
-    branch: main
+    branch: master
     healthCheckPath: /api/health
     dockerfilePath: ./backend/Dockerfile
     envVars:
@@ -30,7 +30,7 @@ services:
   - type: web
     name: shipment-tracker-frontend
     env: static
-    branch: main
+    branch: master
     buildCommand: "cd frontend && npm install && npm run build"
     staticPublishPath: frontend/dist
     routes:

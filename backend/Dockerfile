@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Install OS-level dependencies for Playwright/Chromium
+# Install OS-level dependencies for Playwright/Chromium + Xvfb for non-headless Chrome on Linux
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
     libxcb1 \
     libxext6 \
     libxss1 \
+    xvfb \
     wget \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -32,9 +33,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium (the only browser we need)
+# Install Playwright browsers:
+#   chromium — used by Day & Ross and Polaris (headless, no Akamai issue)
+#   chrome   — Chrome for Testing, used by UPS/FedEx via non-headless + Xvfb
 RUN playwright install chromium
 RUN playwright install-deps chromium
+RUN playwright install chrome
 
 # Copy application code
 COPY . .

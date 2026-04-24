@@ -62,73 +62,84 @@ class FedExScraper(BaseScraper):
         FedEx uses Akamai which blocks headless browsers. Real (non-headless)
         Chrome passes the Akamai challenge and lets the FedEx SPA call the
         actual tracking API. We intercept that API call.
-        Only used on Windows (where a display is always available).
-        The window is positioned off-screen to keep it invisible.
+        On Windows: uses real display. On Linux: uses Xvfb via pyvirtualdisplay.
         """
+        display = None
         if sys.platform != "win32":
-            return self._empty_result("FedEx non-headless only available on Windows")
+            try:
+                from pyvirtualdisplay import Display
+                display = Display(visible=False, size=(1280, 800))
+                display.start()
+            except Exception as exc:
+                logger.warning("FedEx: virtual display unavailable: %s", exc)
+                return self._empty_result("Virtual display unavailable — xvfb/pyvirtualdisplay not installed")
 
         intercepted: List[dict] = []
-
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(
-                    channel="chrome",
-                    headless=False,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-            except Exception:
-                # Chrome not installed — skip
-                return self._empty_result("Chrome not installed, skipping non-headless")
-
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/Toronto",
-            )
-            page = context.new_page()
-
-            def handle_response(response):
+        try:
+            with sync_playwright() as p:
                 try:
-                    if response.status != 200:
-                        return
-                    url = response.url
-                    ct = response.headers.get("content-type", "")
-                    if "json" not in ct:
-                        return
-                    if "track/v2/shipments" in url or "track/v1/trackingdocuments" in url or "trackingresults" in url:
-                        body = response.json()
-                        intercepted.append(body)
-                        logger.debug("FedEx non-headless: intercepted %s", url)
+                    browser = p.chromium.launch(
+                        channel="chrome",
+                        headless=False,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                        ],
+                    )
+                except Exception:
+                    return self._empty_result("Chrome not installed, skipping non-headless")
+
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                    timezone_id="America/Toronto",
+                )
+                page = context.new_page()
+
+                def handle_response(response):
+                    try:
+                        if response.status != 200:
+                            return
+                        url = response.url
+                        ct = response.headers.get("content-type", "")
+                        if "json" not in ct:
+                            return
+                        if "track/v2/shipments" in url or "track/v1/trackingdocuments" in url or "trackingresults" in url:
+                            body = response.json()
+                            intercepted.append(body)
+                            logger.debug("FedEx non-headless: intercepted %s", url)
+                    except Exception:
+                        pass
+
+                page.on("response", handle_response)
+
+                try:
+                    url = FEDEX_TRACK_URL.format(tracking_number=tracking_number)
+                    page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                    page.wait_for_timeout(random.randint(8000, 12000))
+
+                    for data in reversed(intercepted):
+                        result = self._parse_api_response(data)
+                        if result:
+                            logger.info("FedEx non-headless: parsed for %s", tracking_number)
+                            return result
+
+                    return self._empty_result("FedEx non-headless: no API data intercepted")
+                except Exception as exc:
+                    return self._empty_result(f"FedEx non-headless error: {exc}")
+                finally:
+                    browser.close()
+        finally:
+            if display:
+                try:
+                    display.stop()
                 except Exception:
                     pass
-
-            page.on("response", handle_response)
-
-            try:
-                url = FEDEX_TRACK_URL.format(tracking_number=tracking_number)
-                page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                page.wait_for_timeout(random.randint(8000, 12000))
-
-                for data in reversed(intercepted):
-                    result = self._parse_api_response(data)
-                    if result:
-                        logger.info("FedEx non-headless: parsed for %s", tracking_number)
-                        return result
-
-                return self._empty_result("FedEx non-headless: no API data intercepted")
-            except Exception as exc:
-                return self._empty_result(f"FedEx non-headless error: {exc}")
-            finally:
-                browser.close()
 
     # ── Playwright headless fallback ─────────────────────────────────────────
 

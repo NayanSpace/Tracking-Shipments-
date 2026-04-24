@@ -30,16 +30,16 @@ class UPSScraper(BaseScraper):
     """
 
     async def scrape(self, tracking_number: str) -> Dict[str, Any]:
-        # Try non-headless Chrome first (bypasses rate-limiting bot detection)
-        if sys.platform == "win32":
-            try:
-                result = await asyncio.to_thread(self._chrome_scrape, tracking_number)
-                if result.get("error") is None:
-                    logger.info("UPS: Chrome scrape succeeded for %s", tracking_number)
-                    return result
-                logger.info("UPS Chrome scrape failed (%s), falling back", result["error"])
-            except Exception as exc:
-                logger.warning("UPS Chrome scrape exception for %s: %s", tracking_number, exc)
+        # Try non-headless Chrome first (bypasses Akamai bot detection).
+        # On Windows: uses real display. On Linux: uses Xvfb via pyvirtualdisplay.
+        try:
+            result = await asyncio.to_thread(self._chrome_scrape, tracking_number)
+            if result.get("error") is None:
+                logger.info("UPS: Chrome scrape succeeded for %s", tracking_number)
+                return result
+            logger.info("UPS Chrome scrape failed (%s), falling back", result["error"])
+        except Exception as exc:
+            logger.warning("UPS Chrome scrape exception for %s: %s", tracking_number, exc)
 
         # Headless fallback with retries
         last_error = None
@@ -63,68 +63,85 @@ class UPSScraper(BaseScraper):
     # ── Non-headless Chrome (bypasses bot detection) ─────────────────────────
 
     def _chrome_scrape(self, tracking_number: str) -> Dict[str, Any]:
-        intercepted: List[dict] = []
-
-        with sync_playwright() as p:
+        # On Linux (Docker/production) start a virtual framebuffer so non-headless Chrome has a display.
+        display = None
+        if sys.platform != "win32":
             try:
-                browser = p.chromium.launch(
-                    channel="chrome",
-                    headless=False,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-            except Exception:
-                return self._empty_result("Chrome not installed")
+                from pyvirtualdisplay import Display
+                display = Display(visible=False, size=(1280, 800))
+                display.start()
+            except Exception as exc:
+                logger.warning("UPS: virtual display unavailable: %s", exc)
+                return self._empty_result("Virtual display unavailable — xvfb/pyvirtualdisplay not installed")
 
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                timezone_id="America/Toronto",
-            )
-            page = context.new_page()
-
-            def handle_response(response):
+        intercepted: List[dict] = []
+        try:
+            with sync_playwright() as p:
                 try:
-                    url = response.url
-                    if (
-                        "ups.com" in url
-                        and response.status == 200
-                        and ("GetStatus" in url or "/track/api/" in url)
-                        and "json" in response.headers.get("content-type", "")
-                    ):
-                        intercepted.append(response.json())
-                        logger.debug("UPS Chrome: intercepted %s", url)
+                    browser = p.chromium.launch(
+                        channel="chrome",
+                        headless=False,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                        ],
+                    )
+                except Exception:
+                    return self._empty_result("Chrome not installed")
+
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                    timezone_id="America/Toronto",
+                )
+                page = context.new_page()
+
+                def handle_response(response):
+                    try:
+                        url = response.url
+                        if (
+                            "ups.com" in url
+                            and response.status == 200
+                            and ("GetStatus" in url or "/track/api/" in url)
+                            and "json" in response.headers.get("content-type", "")
+                        ):
+                            intercepted.append(response.json())
+                            logger.debug("UPS Chrome: intercepted %s", url)
+                    except Exception:
+                        pass
+
+                page.on("response", handle_response)
+
+                try:
+                    url = UPS_TRACK_URL.format(tracking_number=tracking_number)
+                    page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
+                    page.wait_for_timeout(random.randint(8000, 12000))
+
+                    for data in reversed(intercepted):
+                        result = self._parse_api_response(data)
+                        if result:
+                            logger.info("UPS Chrome: parsed from API for %s", tracking_number)
+                            return result
+
+                    # Fall back to page text in the same Chrome session
+                    body_text = page.inner_text("body") or ""
+                    return self._parse_page_text(body_text, tracking_number)
+
+                except Exception as exc:
+                    return self._empty_result(f"UPS Chrome error: {exc}")
+                finally:
+                    browser.close()
+        finally:
+            if display:
+                try:
+                    display.stop()
                 except Exception:
                     pass
-
-            page.on("response", handle_response)
-
-            try:
-                url = UPS_TRACK_URL.format(tracking_number=tracking_number)
-                page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-                page.wait_for_timeout(random.randint(8000, 12000))
-
-                for data in reversed(intercepted):
-                    result = self._parse_api_response(data)
-                    if result:
-                        logger.info("UPS Chrome: parsed from API for %s", tracking_number)
-                        return result
-
-                # Fall back to page text in the same Chrome session
-                body_text = page.inner_text("body") or ""
-                return self._parse_page_text(body_text, tracking_number)
-
-            except Exception as exc:
-                return self._empty_result(f"UPS Chrome error: {exc}")
-            finally:
-                browser.close()
 
     # ── Headless fallback ─────────────────────────────────────────────────────
 

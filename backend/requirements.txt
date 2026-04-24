@@ -17,3 +17,4 @@ lxml==5.1.0
 python-dotenv==1.0.0
 slowapi==0.1.9
 curl_cffi==0.14.0
+pyvirtualdisplay==3.0
